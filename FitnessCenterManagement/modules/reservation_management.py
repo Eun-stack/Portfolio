@@ -2,6 +2,7 @@
 import streamlit as st
 from datetime import datetime, timedelta
 from supabase import create_client
+import time
 
 def load_members(supabase):
     return supabase.table("members").select("*").execute().data or []

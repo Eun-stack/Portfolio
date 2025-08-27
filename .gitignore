@@ -1,0 +1,16 @@
+# 환경/빌드 산출물
+.env*
+*.env
+*.csv
+*.json
+node_modules/
+dist/
+build/
+
+# 로그/캐시
+*.log
+**/__pycache__/
+*.pyc
+
+# 예시 파일은 추적 유지
+!.env.example
