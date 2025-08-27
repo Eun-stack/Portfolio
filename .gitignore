@@ -14,3 +14,7 @@ build/
 
 # 예시 파일은 추적 유지
 !.env.example
+
+
+# 파일명 지정
+GenStory_deploy.py
