@@ -1,3 +1,20 @@
+## 프로젝트 소개
+### nlp_analysis.py
+- Stanza, Gemini API를 활용한 문장구조 분석 및 번역, 시각화(Google API는 현재 미사용)
+### FitnessCenterManagement
+- Supabase DB와 smtplib 이메일 송신 모듈을 활용, 회원 출입/예약 관리 및 메일 자동발송 기능 구현
+### nos_nieuws_crawling
+- RSS 기반 뉴스기사 수집
+
+- Uses official NOS RSS feeds only (no HTML crawling).
+- Shows short previews (<=3 sentences / 500 chars) with source links.
+- CSV export contains only title, URL, and extracted keywords.
+- All article copyrights remain with NOS.
+
+### pygame_mini_game
+- 파이썬 Pygame으로 방향키 조작 기반 미니게임 제작
+
+
 ## 사용 라이브러리 및 라이선스
 
 - beautifulsoup4 (v4.12.x): MIT License
@@ -41,12 +58,8 @@
   - [공식 홈페이지] (https://supabase.com/)
 
 
-This project includes components licensed under the Apache License, Version 2.0.  
+These projects include components licensed under the Apache License, Version 2.0.  
 Each such component may have its own copyright and NOTICE file.  
 Where required, original NOTICE content is retained in accordance with the license terms.
 
 
-- Uses official NOS RSS feeds only (no HTML crawling).
-- Shows short previews (<=3 sentences / 500 chars) with source links.
-- CSV export contains only title, URL, and extracted keywords.
-- All article copyrights remain with NOS.

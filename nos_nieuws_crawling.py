@@ -1,67 +1,23 @@
 import streamlit as st
-import requests
-from bs4 import BeautifulSoup
 from datetime import datetime
 from collections import Counter
 import csv
-import time
 import re
-import random
 import io
+import feedparser
+import html2text
 
-st.set_page_config(page_title="NOS nieuws crawler", layout="wide")
-st.title("📰 NOS nieuws crawler en trefwoordenextractie")
+st.set_page_config(page_title="NOS RSS crawler", layout="wide")
+st.title("NOS RSS crawler & trefwoorden")
 
-# --------------------- Artikel titel + tekst ---------------------
-def get_article_info(url):
-    stop_words = {
-        "Deel artikel", "Voorpagina", "Laatste nieuws", "Video's", "Binnenland",
-        "Buitenland", "Regionaal nieuws", "Politiek", "Economie", "Koningshuis",
-        "Tech", "Cultuur & media", "Cultuur & Media", "Opmerkelijk",
-        "In samenwerking met RTV Utrecht", "In samenwerking met NH"
-    }
-
-    resp = requests.get(url, headers={
-        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
-    })
-    resp.raise_for_status()
-    time.sleep(random.uniform(1.0, 2.0))
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    main = soup.select_one("main#content")
-    if not main:
-        return "geen titel", "geen tekst"
-
-    h1 = main.find("h1")
-    title = h1.get_text(" ", strip=True) if h1 else "geen titel"
-
-    # 제목 아래 불필요한 <ul> 제거
-    if h1:
-        for sibling in h1.find_next_siblings():
-            # 본문 시작으로 판단되는 <p>가 나오면 반복 중단
-            if sibling.name == "p":
-                break
-            if sibling.name == "ul":
-                sibling.decompose()
-
-    parts = []
-    for el in main.find_all(["p", "h2", "li"], recursive=True):
-        txt = el.get_text(" ", strip=True)
-        if not txt:
-            continue
-        if title and txt == title:
-            continue
-        if txt in stop_words:
-            break
-        if el.name == "h2":
-            parts.append(f"\n**{txt}**\n")
-        elif el.name == "li":
-            parts.append(f"- {txt}")
-        else:
-            parts.append(txt)
-
-    body = "\n\n".join(parts)
-    return title, body
+# --------------------- Disclaimer ---------------------
+st.info(
+    """
+    이 앱은 **NOS의 공식 RSS 피드**만 사용합니다. 본문 전문을 저장/배포하지 않으며,
+    화면에는 **짧은 요약(최대 3문장·500자)** 만 표시합니다. 모든 저작권은 원 출처(NOS.nl)에 있습니다.
+    """,
+    icon="ℹ️",
+)
 
 # --------------------- Stopwoorden ---------------------
 dutch_stopwords = {
@@ -71,14 +27,36 @@ dutch_stopwords = {
     "over", "ze", "zich", "bij", "ook", "tot", "je", "mij", "uit", "der", "daar",
     "haar", "naar", "heb", "hoe", "heeft", "hebben", "deze", "u", "want", "nog",
     "zal", "me", "zij", "nu", "ge", "geen", "omdat", "iets", "worden", "toch",
-    "al", "waren", "veel", "meer", "doen", "toen", "moet", "ben", "zonder", "kan",
+    "al", "waren", "veel", "meer", "doen", "toen", "모et", "ben", "zonder", "kan",
     "hun", "dus", "alles", "onder", "ja", "werd", "wezen", "zelf", "tegen",
     "komen", "goed", "hier", "wie", "waarom"
 }
 
+# --------------------- Helper: safe preview ---------------------
+def make_safe_preview(md_text: str, max_sentences: int = 3, max_chars: int = 500) -> str:
+    """RSS 요약 반환
+    - 문장 기준 최대 3문장
+    - 총 길이 최대 500자
+    """
+    if not md_text:
+        return ""
+    # 공백 정리
+    text = re.sub(r"\s+", " ", md_text).strip()
+    # 단순 문장 분리 (., !, ? 뒤 공백 기준) — 네덜란드어 포함 일반적 케이스 커버
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    preview = " ".join(sentences[:max_sentences]).strip()
+    # 글자 수 제한
+    if len(preview) > max_chars:
+        cut = preview[:max_chars]
+        # 마지막 단어 경계에서 자르기
+        if " " in cut:
+            cut = cut.rsplit(" ", 1)[0]
+        preview = cut.rstrip(" .,;:") + "…"
+    return preview
+
 # --------------------- Trefwoordenextractie ---------------------
-def extract_keywords(text, top_n=10):
-    words = re.findall(r'\b[a-zA-Z]{10,}\b', text)
+def extract_keywords(text: str, top_n: int = 10):
+    words = re.findall(r"\b[a-zA-Z]{8,}\b", text)
     capitalized_words = [w.capitalize() for w in words]
     filtered_words = [w for w in capitalized_words if w.lower() not in dutch_stopwords]
     freq = Counter(filtered_words)
@@ -92,146 +70,112 @@ def extract_keywords(text, top_n=10):
 
     return [(kw, freq[kw]) for kw in unique_keywords], filtered_words
 
-# --------------------- Nieuws crawlen ---------------------
-def crawling_news(category_slug, count=2, animation_placeholder=None):
-    base_url = "https://nos.nl/"
-    category_url = base_url + category_slug
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"
-    }
+# --------------------- RSS Fetch ---------------------
+def fetch_rss_items(feed_url: str, count: int = 5, progress_bar=None):
+    parsed = feedparser.parse(feed_url)
+    entries = parsed.entries or []
 
-    news_list = []
-    try:
-        resp = requests.get(category_url, headers=headers)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
+    total = min(count, len(entries)) if entries else 0
+    out = []
+    h = html2text.HTML2Text()
+    h.ignore_links = False
+    h.body_width = 0
 
-        articles = soup.select("a[href*='/artikel']")
-        urls_seen = set()
+    for i, e in enumerate(entries[:total], start=1):
+        title = getattr(e, "title", "(geen titel)")
+        link = getattr(e, "link", "")
+        summary_html = getattr(e, "summary", getattr(e, "description", ""))
+        summary_md = h.handle(summary_html).strip()
 
-        progress = st.progress(0)
-        total = min(count, len(articles))
+        keywords, _ = extract_keywords(f"{title}\n{summary_md}")
 
-        icons = ["🔄", "🔁"]
-        icon_index = 0
+        out.append({
+            "title": title,
+            "url": link,
+            "summary": summary_md,  # 원본 요약(전체) — 화면표시는 make_safe_preview로 제한
+            "keywords": [kw for kw, _ in keywords],
+        })
 
-        for idx, link in enumerate(articles):
-            if len(news_list) >= count:
-                break
+        if progress_bar:
+            progress_bar.progress(int(i / max(total, 1) * 100))
 
-            url = link.get('href')
-            if not url or url in urls_seen:
-                continue
-            if not url.startswith("http"):
-                url = "https://nos.nl" + url
-            urls_seen.add(url)
+    if progress_bar:
+        progress_bar.empty()
 
-            # 애니메이션 이모지 출력
-            if animation_placeholder:
-                animation_placeholder.markdown(f"{icons[icon_index % 2]} Bezig met ophalen van nieuws...")
-                icon_index += 1
+    return out
 
-            try:
-                title, body = get_article_info(url)
-                keywords, long_words = extract_keywords(body)
-
-                news_list.append({
-                    'title': title,
-                    'url': url,
-                    'body': body,
-                    'keywords': [kw for kw, _ in keywords],
-                    'lange_woorden': long_words
-                })
-
-                progress.progress(int((len(news_list) / total) * 100))
-                time.sleep(random.uniform(2.0, 3.0))
-
-            except:
-                continue
-
-        progress.empty()
-        if animation_placeholder:
-            animation_placeholder.markdown("✅ Crawlen voltooid!")
-
-    except Exception as e:
-        st.error(f"Fout bij het crawlen van nieuws: {e}")
-        st.write(f"❌ Mislukte URL: {category_url}")
-
-    return news_list
-
-# --------------------- CSV genereren ---------------------
+# --------------------- CSV ---------------------
 def generate_csv_bytes(result):
     if not result:
         return None
     output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=['index', 'title', 'url', 'keywords', 'lange_woorden'])
+    writer = csv.DictWriter(output, fieldnames=["index", "title", "url", "keywords"])
     writer.writeheader()
-    for idx, news in enumerate(result, 1):
+    for idx, item in enumerate(result, 1):
         writer.writerow({
-            'index': idx,
-            'title': news['title'],
-            'url': news['url'],
-            'keywords': ', '.join(news['keywords']),
-            'lange_woorden': ', '.join(news['lange_woorden'])
+            "index": idx,
+            "title": item["title"],
+            "url": item["url"],
+            "keywords": ", ".join(item["keywords"]),
         })
-    return output.getvalue().encode('utf-8-sig')
-
-# --------------------- UI Categorieën ---------------------
-menu_dict = {
-    1: "Laatste nieuws",
-    2: "Video's",
-    3: "Binnenland",
-    4: "Buitenland",
-    5: "Regionaal nieuws",
-    6: "Politiek",
-    7: "Economie",
-    8: "Koningshuis",
-    9: "Tech",
-    10: "Cultuur & media",
-    11: "Opmerkelijk"
-}
-
-menu_url_map = {
-    "Laatste nieuws": "nieuws/laatste",
-    "Video's": "nieuws/laatste/videos",
-    "Binnenland": "nieuws/binnenland",
-    "Buitenland": "nieuws/buitenland",
-    "Regionaal nieuws": "nieuws/regio",
-    "Politiek": "nieuws/politiek",
-    "Economie": "nieuws/economie",
-    "Koningshuis": "nieuws/koningshuis",
-    "Tech": "nieuws/tech",
-    "Cultuur & media": "nieuws/cultuur-en-media",
-    "Opmerkelijk": "nieuws/opmerkelijk"
-}
+    return output.getvalue().encode("utf-8-sig")
 
 # --------------------- UI ---------------------
-selected = st.selectbox("🗂️ Kies een categorie", list(menu_dict.keys()), format_func=lambda x: f"{x}. {menu_dict[x]}")
-article_count = st.slider("📰 Aantal artikelen", 1, 10, 2)
+presets = {
+    "NOS Nieuws Algemeen": "https://feeds.nos.nl/nosnieuwsalgemeen",
+    "NOS Binnenland": "https://feeds.nos.nl/nosnieuwsbinnenland",
+    "NOS Buitenland": "https://feeds.nos.nl/nosnieuwsbuitenland",
+    "NOS Politiek": "https://feeds.nos.nl/nosnieuwspolitiek",
+    "NOS Economie": "https://feeds.nos.nl/nosnieuwseconomie",
+    "NOS Tech": "https://feeds.nos.nl/nosnieuwstech",
+    "NOS Opmerkelijk": "https://feeds.nos.nl/nosnieuwsopmerkelijk",
+    "NOS Sport Algemeen": "https://feeds.nos.nl/nossportalgemeen",
+}
 
-if st.button("🚀 Start nieuws crawling"):
-    animation_placeholder = st.empty()
-    selected_name = menu_dict[selected]
-    category_slug = menu_url_map.get(selected_name, "")
-    result = crawling_news(category_slug, article_count, animation_placeholder)
+left, right = st.columns([2, 3])
+with left:
+    preset_name = st.selectbox("RSS 프리셋 선택", list(presets.keys()) + ["Custom"])
 
-    for i, news in enumerate(result, 1):
-        st.markdown(f"### {i}. {news['title']}")
-        st.markdown(f"🔗 [Artikel link]({news['url']})")
-        st.markdown(f"🧠 **Trefwoorden:** {', '.join(news['keywords'])}")
-        with st.expander("📄 Toon artikeltekst"):
-            st.write(news['body'])
+with right:
+    default_url = presets.get(preset_name, "https://feeds.nos.nl/nosnieuwsalgemeen")
+    feed_url = st.text_input("또는 RSS URL 직접 입력", value=default_url, help="매체의 공식 RSS URL을 입력하세요.")
 
-    # CSV 다운로드
-    if result and st.checkbox("📄 CSV-bestand genereren?"):
+article_count = st.slider("항목 수", 1, 20, 5)
+
+# --------------------- Start Crawling ---------------------
+if st.button("RSS 가져오기"):
+    progress = st.progress(0)
+    result = fetch_rss_items(feed_url, article_count, progress)
+    if result:
+        st.session_state["rss_result"] = result
+        st.success(f"✅ {len(result)}개의 뉴스 항목을 가져왔습니다.")
+
+# --------------------- Show Results ---------------------
+if "rss_result" in st.session_state:
+    result = st.session_state["rss_result"]
+
+    for i, item in enumerate(result, 1):
+        st.markdown(f"### {i}. {item['title']}")
+        st.markdown(f"🔗 [원문 링크]({item['url']})")
+        st.markdown(f"**Trefwoorden:** {', '.join(item['keywords'])}")
+        with st.expander("요약 보기 (최대 3문장·500자)"):
+            preview = make_safe_preview(item["summary"])  # 항상 짧게 제한된 요약만 노출
+            st.markdown(preview or "(요약 없음)")
+            if item["url"]:
+                st.markdown(f"_Bron: [NOS.nl]({item['url']})_")
+
+    if st.button("📥 CSV 저장하기"):
         csv_bytes = generate_csv_bytes(result)
         if csv_bytes:
-            st.success("✅ CSV-bestand is aangemaakt.")
-            st.download_button(
-                label="📥 Download CSV",
-                data=csv_bytes,
-                file_name=f"nos_nieuws_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                mime="text/csv"
-            )
+            st.session_state["csv_data"] = csv_bytes
+            st.success("✅ CSV 파일이 생성되었습니다.")
         else:
-            st.warning("⚠️ Geen nieuwsgegevens om op te slaan.")
+            st.warning("⚠️ 저장할 데이터가 없습니다.")
+
+    if "csv_data" in st.session_state:
+        st.download_button(
+            label="📄 CSV 다운로드",
+            data=st.session_state["csv_data"],
+            file_name=f"nos_rss_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv",
+        )
