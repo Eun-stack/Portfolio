@@ -4,8 +4,9 @@ from collections import Counter
 import csv
 import re
 import io
-import feedparser
-import html2text
+import requests
+from bs4 import BeautifulSoup
+import xml.etree.ElementTree as ET
 
 st.set_page_config(page_title="NOS RSS crawler", layout="wide")
 st.title("NOS RSS crawler & trefwoorden")
@@ -34,21 +35,13 @@ dutch_stopwords = {
 
 # --------------------- Helper: safe preview ---------------------
 def make_safe_preview(md_text: str, max_sentences: int = 3, max_chars: int = 500) -> str:
-    """RSS 요약 반환
-    - 문장 기준 최대 3문장
-    - 총 길이 최대 500자
-    """
     if not md_text:
         return ""
-    # 공백 정리
     text = re.sub(r"\s+", " ", md_text).strip()
-    # 단순 문장 분리 (., !, ? 뒤 공백 기준) — 네덜란드어 포함 일반적 케이스 커버
     sentences = re.split(r"(?<=[.!?])\s+", text)
     preview = " ".join(sentences[:max_sentences]).strip()
-    # 글자 수 제한
     if len(preview) > max_chars:
         cut = preview[:max_chars]
-        # 마지막 단어 경계에서 자르기
         if " " in cut:
             cut = cut.rsplit(" ", 1)[0]
         preview = cut.rstrip(" .,;:") + "…"
@@ -70,29 +63,63 @@ def extract_keywords(text: str, top_n: int = 10):
 
     return [(kw, freq[kw]) for kw in unique_keywords], filtered_words
 
-# --------------------- RSS Fetch ---------------------
+# --------------------- HTML to text ---------------------
+def html_to_text(html: str) -> str:
+    soup = BeautifulSoup(html or "", "html.parser")
+    return soup.get_text(separator=" ", strip=True)
+
+# --------------------- RSS Fetch (표준 XML로) ---------------------
 def fetch_rss_items(feed_url: str, count: int = 5, progress_bar=None):
-    parsed = feedparser.parse(feed_url)
-    entries = parsed.entries or []
+    try:
+        resp = requests.get(feed_url, timeout=10)
+        resp.raise_for_status()
+    except Exception as e:
+        st.error(f"RSS 피드 요청 실패: {e}")
+        return []
 
-    total = min(count, len(entries)) if entries else 0
+    # RSS 피드 파싱 (ElementTree)
+    try:
+        tree = ET.fromstring(resp.content)
+    except Exception as e:
+        st.error(f"RSS XML 파싱 실패: {e}")
+        return []
+
+    # RSS 2.0: <item>들, Atom일 경우 <entry>들
+    items = tree.findall(".//item")
+    if not items:
+        # Atom 지원
+        items = tree.findall(".//{http://www.w3.org/2005/Atom}entry")
+        atom = True
+    else:
+        atom = False
+
+    total = min(count, len(items))
     out = []
-    h = html2text.HTML2Text()
-    h.ignore_links = False
-    h.body_width = 0
 
-    for i, e in enumerate(entries[:total], start=1):
-        title = getattr(e, "title", "(geen titel)")
-        link = getattr(e, "link", "")
-        summary_html = getattr(e, "summary", getattr(e, "description", ""))
-        summary_md = h.handle(summary_html).strip()
+    for i, item in enumerate(items[:total], start=1):
+        if atom:
+            get = lambda tag: item.find(f"{{http://www.w3.org/2005/Atom}}{tag}")
+            title = get("title").text if get("title") is not None else "(geen titel)"
+            link = None
+            for l in item.findall(f"{{http://www.w3.org/2005/Atom}}link"):
+                if l.attrib.get("type") == "text/html" or l.attrib.get("rel") == "alternate":
+                    link = l.attrib.get("href")
+                    break
+            link = link or (get("link").attrib.get("href") if get("link") is not None else "")
+            summary_html = get("summary").text if get("summary") is not None else ""
+        else:
+            get = lambda tag: item.find(tag)
+            title = get("title").text if get("title") is not None else "(geen titel)"
+            link = get("link").text if get("link") is not None else ""
+            summary_html = get("description").text if get("description") is not None else ""
 
-        keywords, _ = extract_keywords(f"{title}\n{summary_md}")
+        summary_txt = html_to_text(summary_html)
+        keywords, _ = extract_keywords(f"{title}\n{summary_txt}")
 
         out.append({
             "title": title,
             "url": link,
-            "summary": summary_md,  # 원본 요약(전체) — 화면표시는 make_safe_preview로 제한
+            "summary": summary_txt,
             "keywords": [kw for kw, _ in keywords],
         })
 
@@ -159,7 +186,7 @@ if "rss_result" in st.session_state:
         st.markdown(f"🔗 [원문 링크]({item['url']})")
         st.markdown(f"**Trefwoorden:** {', '.join(item['keywords'])}")
         with st.expander("요약 보기 (최대 3문장·500자)"):
-            preview = make_safe_preview(item["summary"])  # 항상 짧게 제한된 요약만 노출
+            preview = make_safe_preview(item["summary"])
             st.markdown(preview or "(요약 없음)")
             if item["url"]:
                 st.markdown(f"_Bron: [NOS.nl]({item['url']})_")
