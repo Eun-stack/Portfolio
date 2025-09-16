@@ -1,0 +1,16 @@
+streamlit
+numpy
+pandas
+plotly
+selenium
+beautifulsoup4
+requests
+stanza
+Pillow
+matplotlib
+fitz
+google-generativeai
+transformers
+supabase
+pytrends
+fastapi
